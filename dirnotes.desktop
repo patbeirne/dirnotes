@@ -1,0 +1,9 @@
+[Desktop Entry]
+Type=Application
+Encoding=UTF-8
+Name=Dirnotes
+Comment=add comments to file
+Icon=/home/patb/.local/share/icons/dirnotes.xpm
+Exec=/home/patb/.local/bin/dirnotes
+Terminal=false
+Categories=Tags;Describing;Application

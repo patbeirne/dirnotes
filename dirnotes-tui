@@ -1,0 +1,1010 @@
+#!/usr/bin/env python3 
+
+# TODO: write color scheme
+# TODO: re-read date/author to xattr after an edit
+# TODO: consider adding h,j,k,l movement
+# TODO: change move command to 'v', change mode to 'm', drop copy-comments
+# TODO: bug: enter db mode, type E to edit a comment, we get the xattr version!!
+# TODO: try to clear a comment, left with ' '
+
+# scroll
+# up/down - change focus, at limit: move 1 line,
+# pgup/down - move by (visible_range - 1), leave focus on the remaining element
+# home/end - top/bottom, focus on first/last
+
+# three main classes:
+#   Pane: smart curses window cluster: main, status & scrolling pad
+#   FileObj: a file with its xattr-comment and db-comment data
+#   Files: a collection of FileObjs, sortable
+
+import sys, time
+import curses, curses.textpad
+import logging, argparse
+
+VERSION = "1.9"
+# these may be different on MacOS
+xattr_comment = "user.xdg.comment"
+xattr_author  = "user.xdg.comment.author"
+xattr_date    = "user.xdg.comment.date"
+DATE_FORMAT   = "%Y-%m-%d %H:%M:%S"
+
+mode_names = {"db":"<Database mode> ","xattr":"<Xattr mode>"}
+modes = ("db","xattr")
+mode = "db"
+
+### commands
+CMD_COPY   = ord('c')  # open dialog to copy-with-comment
+CMD_DETAIL = ord('d')  # open dialog
+CMD_EDIT   = ord('e')  # open dialog for typing & <esc> or <enter>
+CMD_HELP   = ord('h')  # open dialog
+CMD_MODE   = ord('M')  # switch between xattr and database mode
+CMD_MOVE   = ord('m')  # open dialog to move-with-comment
+CMD_QUIT   = ord('q')
+CMD_RELOAD = ord('r')  # reload
+CMD_SORT   = ord('s')  # open dialog for N,S,D,C
+CMD_CMNT_CP= ord('C')  # open dialog to copy comments accept 1 or a or <esc>
+CMD_ESC    = 27
+CMD_CD     = ord('\n')
+
+# file comments will ALWAYS be written to both xattrs & database
+#   access failure is shown once per directory
+
+# other options will be stored in database at ~/.dirnotes.db or /etc/dirnotes.db
+#   - option to use MacOSX xattr labels
+#  
+
+# at first launch (neither database is found), give the user a choice of
+# ~/.dirnotes.db or /var/lib/dirnotes.db
+# at usage time, check for ~/.dirnotes.db first
+
+### colors
+
+CP_TITLE  = 1
+CP_BODY   = 2
+CP_FOCUS  = 3
+CP_ERROR  = 4
+CP_HELP   = 5
+CP_DIFFER = 6
+COLOR_DIFFER = COLOR_TITLE = COLOR_BODY = COLOR_FOCUS = COLOR_ERROR = COLOR_HELP = None
+
+COLOR_THEME = ''' { "heading": ("yellow","blue"),
+  "body":("white","blue"),
+  "focus":("black","cyan") }
+'''
+
+now = time.time()
+YEAR = 3600*24*365
+
+verbose = None
+def print_d(*a):
+  if verbose:
+    print(*a)
+
+class Pane:
+  ''' holds the whole display: handles file list directly,
+      fills a child pad with the file info,
+        draws scroll bar
+        defers the status line to a child 
+        draws a border
+      line format: filename=30%, size=7, date=12, comment=rest
+      line 1=current directory + border
+      line 2...h-4 = filename
+      line h-3 = border
+      line h-2 = status
+      line h-1 = border
+      column 0, sep1, sep2, sep3 and w-1 are borders w.r.t. pad
+      filename starts in column 1 (border in 0)
+
+      most methods take y=0..h-1 where y is the line number WITHIN the borders
+  '''
+  def __init__(self, win, curdir, files, start_file = None):
+    self.curdir = curdir
+    self.cursor = None
+    self.first_visible = 0
+    self.nFiles = len(files)
+    self.start_file = start_file
+    
+    self.h, self.w = win.getmaxyx()
+    
+    self.main_win = win                               # whole screen
+    self.win = win.subwin(self.h-1,self.w,0,0)        # upper window, for border
+    self.statusbar = win.subwin(1,self.w,self.h-1,0)  # status at the bottom
+    self.pad_height = max(self.nFiles,self.h-4)
+    self.file_pad = curses.newpad(self.pad_height,self.w)
+    self.file_pad.keypad(True)
+
+    self.win.bkgdset(' ',curses.color_pair(CP_BODY))
+    self.statusbar.bkgdset(' ',curses.color_pair(CP_BODY))
+    self.file_pad.bkgdset(' ',curses.color_pair(CP_BODY))
+    self.resize()
+
+    logging.info("made the pane")
+
+  def resize(self):   # and refill
+    logging.info("got to resize")
+    self.h, self.w = self.main_win.getmaxyx()
+    self.sep1 = self.w // 3
+    self.sep2 = self.sep1 + 8
+    self.sep3 = self.sep2 + 13
+    self.win.resize(self.h-1,self.w)
+    self.statusbar.resize(1,self.w)
+    self.statusbar.mvwin(self.h-1,0)
+    self.pad_height = max(len(files),self.h-4)
+    self.pad_visible = self.h-4
+    self.file_pad.resize(self.pad_height+1,self.w-2)
+    self.refill()
+    self.refresh()
+
+  def refresh(self):
+    self.win.refresh()
+ 
+    if self.some_comments_differ:
+      self.setStatus("The xattr and database comments differ where shown in green")
+    else:
+      self.setStatus("")
+
+    self.file_pad.refresh(self.first_visible,0, 2,1, self.h-3,self.w-2)
+ 
+  def refill(self):
+    self.win.bkgdset(' ',curses.color_pair(CP_BODY))
+    self.win.erase()
+    self.win.box() 
+    h,w = self.win.getmaxyx()
+    self.win.addnstr(0,3,os.path.realpath(self.curdir),w-4)
+    mc = files.getMasterComment()
+    if mc:
+      self.win.addnstr(0,w-len(mc)-1,files.getMasterComment(),w-len(mc)-1)
+    self.win.attron(COLOR_TITLE | curses.A_BOLD)
+    self.win.addstr(1,1,'Name'.center(self.sep1-1))
+    self.win.addstr(1,self.sep1+2,'Size')
+    self.win.addstr(1,self.sep2+4,'Date')
+    self.win.addstr(1,self.sep3+2,'Comments')
+    self.win.attroff(COLOR_BODY)
+
+    self.some_comments_differ = False
+    # now fill the file_pad
+    for i,f in enumerate(files):
+      self.fill_line(i)    # fill the file_pad
+    if self.nFiles < self.pad_height:
+      for i in range(self.nFiles, self.pad_height):
+        self.file_pad.addstr(i,0,' ' * (self.w-2))
+
+    # and display the file_pan
+    if self.cursor == None:
+      self.cursor = 0
+      if self.start_file:  # if the command line had a file, find it and highlight it....once
+        for i,f in enumerate(files):
+          if f.getDisplayName() == self.start_file:
+            self.cursor = i
+      self.start_file = None
+    self.focus_line()
+
+  def fill_line(self,y):
+    #logging.info(f"about to add {self.w-2} spaces at {y} to the file_pad size: {self.file_pad.getmaxyx()}")
+    f = files[y]  
+    self.file_pad.addstr(y,0,' ' * (self.w-2))
+    self.file_pad.addnstr(y,0,f.getDisplayName(),self.sep1-1)
+    self.file_pad.addstr(y,self.sep1,UiHelper.getShortSize(f))
+    self.file_pad.addstr(y,self.sep2,UiHelper.getShortDate(f.date))
+
+    comment = f.getComment(mode) or ''
+    other   = f.getOtherComment(mode) or ''
+    logging.info(f"file_line, comments are <{comment}> and <{other}>  differ_flag:{self.some_comments_differ}")
+    if comment == other:
+      self.file_pad.addnstr(y,self.sep3,comment,self.w-self.sep3-2)
+    else:
+      self.some_comments_differ = True
+      self.file_pad.attron(COLOR_HELP)
+      self.file_pad.addnstr(y,self.sep3,comment or '       ',self.w-self.sep3-2)
+      self.file_pad.attroff(COLOR_HELP)
+
+    self.file_pad.vline(y,self.sep1-1,curses.ACS_VLINE,1)
+    self.file_pad.vline(y,self.sep2-1,curses.ACS_VLINE,1)
+    self.file_pad.vline(y,self.sep3-1,curses.ACS_VLINE,1)
+
+  def unfocus_line(self):
+    self.fill_line(self.cursor)
+  def focus_line(self):
+    self.file_pad.attron(COLOR_FOCUS)
+    self.fill_line(self.cursor)
+    self.file_pad.attroff(COLOR_FOCUS)
+
+  def line_move(self,direction):
+    # try a move first
+    new_cursor = self.cursor + direction
+    if new_cursor < 0:
+      new_cursor = 0
+    if new_cursor >= self.nFiles:
+      new_cursor = self.nFiles - 1
+    if new_cursor == self.cursor:
+      return
+    # then adjust the window
+    if new_cursor < self.first_visible:
+      self.first_visible = new_cursor
+      self.file_pad.redrawwin()
+    if new_cursor >= self.first_visible + self.pad_visible - 1:
+      self.first_visible = new_cursor - self.pad_visible + 1
+      self.file_pad.redrawwin()
+    self.unfocus_line()
+    self.cursor = new_cursor
+    self.focus_line()
+    self.file_pad.move(self.cursor,0)   # just move the flashing cursor
+    self.file_pad.refresh(self.first_visible,0,2,1,self.h-3,self.w-2)
+    
+  def setStatus(self,data):
+    h,w = self.statusbar.getmaxyx()
+    self.statusbar.clear()
+    self.statusbar.attron(curses.A_REVERSE)
+    self.statusbar.addstr(0,0,mode_names[mode])
+    self.statusbar.attroff(curses.A_REVERSE)
+    y,x = self.statusbar.getyx()
+    self.statusbar.addnstr(" " + data,w-x-1)
+    self.statusbar.refresh()
+
+## to hold the FileObj collection
+
+class Files():
+  def __init__(self,directory,db):
+    self.db = db
+
+    if not os.path.isdir(directory):
+      errorBox(f"the command line argument: {directory} is not a directory; starting in the current directory")
+      directory = '.'
+    self.directory = FileObj(directory,self.db)
+
+    try:
+      current, dirs, non_dirs = next(os.walk(directory))
+    except:
+      errorBox(f"{directory} is not a valid directory")
+      raise
+    if current != '/':
+      dirs.insert(0,"..")
+
+    self.files = []
+    for f in dirs + non_dirs:
+      self.files.append(FileObj(os.path.join(current,f),self.db))
+    self.sort()
+
+
+  def sortName(a):
+    ''' when sorting by name put the .. and other <dir> entries first '''
+    if a.getDisplayName() == '../':
+      return "\x00"
+    if a.isDir():
+      return ' ' + a.getDisplayName()
+    # else:
+    return a.getDisplayName()
+
+  def sortDate(a):
+    if a.getDisplayName() == '../':
+      return 0
+    return a.getDate()
+
+  def sortSize(a):
+    if a.getDisplayName() == '../':
+      return -2
+    if a.isDir() or a.isLink() or a.isSock():
+      return -1
+    return a.getSize()
+
+  def sortComment(a):
+    return a.getComment(mode) or '~'
+
+  sortFunc = sortName
+  def sort(self):
+    self.files.sort(key = Files.sortFunc)
+
+  def getCurDir(self):
+    return self.directory
+  def getMasterComment(self):
+    return self.directory.getComment(mode)
+
+  ## accessors ##
+  def __len__(self):
+    return len(self.files)
+  def __getitem__(self, i):
+    return self.files[i]
+  def __iter__(self):
+    return self.files.__iter__()
+      
+def errorBox(string):
+  if curses_running:
+    werr = curses.newwin(3,len(string)+8,5,5)
+    werr.bkgd(' ',COLOR_ERROR)
+    werr.clear()
+    werr.box()
+    werr.addstr(1,1,string)
+    werr.timeout(3000)
+    werr.getch()  # any key
+    del werr
+  else:
+    print(string)
+    time.sleep(3)
+  
+# >>> snip here <<<
+#============ the DnDataBase, UiHelper and FileObj code is shared with other dirnotes programs
+import getpass, time, stat, shutil, sqlite3, json, os, math
+DEFAULT_CONFIG_FILE = "~/.config/dirnotes/dirnotes.conf" # or /etc/dirnotes.conf
+
+# config
+#    we could store the config in the database, in a second table
+#    or in a .json file
+DEFAULT_CONFIG = {"xattr_tag":"user.xdg.comment",
+  "database":"~/.local/share/dirnotes/dirnotes.db",
+  "start_mode":"xattr",
+  "options for database":("~/.local/share/dirnotes/dirnotes.db","~/.dirnotes.db","/etc/dirnotes.db"),
+  "options for start_mode":("db","xattr")
+}
+
+class ConfigLoader:    # singleton
+  def __init__(self, configFile):
+    configFile = os.path.expanduser(configFile)
+    try:
+      with open(configFile,"r") as f:
+        config = json.load(f)
+    except json.JSONDecodeError:
+      errorBox(f"problem reading config file {configFile}; check the JSON syntax")
+      config = DEFAULT_CONFIG
+    except FileNotFoundError:
+      errorBox(f"config file {configFile} not found; using the default settings")
+      config = DEFAULT_CONFIG
+      try:
+        os.makedirs(os.path.dirname(configFile),exist_ok = True)
+        with open(configFile,"w") as f:
+          json.dump(config,f,indent=4)
+      except:
+        errorBox(f"problem creating the config file {configFile}")
+    self.dbName = os.path.expanduser(config["database"])
+    self.mode = config["start_mode"]    # can get over-ruled by the command line options
+    self.xattr_comment = config["xattr_tag"]
+
+class DnDataBase:
+  ''' the database is flat
+    fileName: fully qualified name
+    st_mtime: a float
+    size: a long
+    comment: a string
+    comment_time: a float, the time of the comment save
+    author: the username that created the comment
+
+    this object: 1) finds or creates the database
+      2) determine if it's readonly
+
+    TODO: the database is usually associated with a user, in $XDG_DATA_HOME (~/.local/share/)
+    TODO: if the database is not found, create it in $XDG_DATA_DIRS (/usr/local/share/)
+      make it 0666 permissions (rw-rw-rw-)
+  '''
+  def __init__(self,dbFile):
+    '''try to open the database; if not found, create it'''
+    try:
+      self.db = sqlite3.connect(dbFile)
+    except sqlite3.OperationalError:
+      print_d(f"Database {dbFile} not found")
+      try: 
+        os.makedirs(os.path.dirname(dbFile), exist_ok = True)
+        self.db = sqlite3.connect(dbFile)
+      except (sqlite3.OperationalError, PermissionError):
+        printd(f"Failed to create {dbFile}, aborting")
+        raise
+
+    # create new table if it doesn't exist
+    try:
+      self.db.execute("select * from dirnotes")
+    except sqlite3.OperationalError:
+      self.db.execute("create table dirnotes (name TEXT, date DATETIME, size INTEGER, comment TEXT, comment_date DATETIME, author TEXT)")
+      self.db.execute("create index dirnotes_i on dirnotes(name)") 
+      print_d(f"Table dirnotes created")
+      # at this point, if a shared database is required, somebody needs to set perms to 0o666
+  
+    self.writable = True
+    try:
+      self.db.execute("pragma user_verson=0")
+    except sqlite3.OperationalError:
+      self.writable = False
+
+DATE_FORMAT   = "%Y-%m-%d %H:%M:%S"
+class UiHelper:
+  @staticmethod
+  def epochToDb(epoch):
+    return time.strftime(DATE_FORMAT,time.localtime(epoch))
+  @staticmethod
+  def DbToEpoch(dbTime):
+    return time.mktime(time.strptime(dbTime,DATE_FORMAT))
+  @staticmethod
+  def getShortDate(longDate):
+    now = time.time()
+    diff = now - longDate
+    if diff > YEAR:
+      fmt = "%b %e  %Y"
+    else:
+      fmt = "%b %e %H:%M"
+    return time.strftime(fmt, time.localtime(longDate))
+  @staticmethod
+  def getShortSize(fo):
+    if fo.isDir():
+      return " <DIR> "
+    elif fo.isLink():
+      return " <LINK>"
+    size = fo.getSize()
+    log = int((math.log10(size+1)-2)/3)
+    s = " KMGTE"[log]
+    base = int(size/math.pow(10,log*3))
+    return f"{base}{s}".strip().rjust(7)
+
+
+## one for each file
+## and a special one for ".." parent directory
+class FileObj:
+  """  The FileObj knows about both kinds of comments. """
+  def __init__(self, fileName, db):
+    self.fileName = os.path.abspath(fileName)     # full path; dirs end WITHOUT a terminal /
+    self.stat = os.lstat(self.fileName)
+    self.displayName = os.path.split(fileName)[1] # base name; dirs end with a /
+    if self.isDir():
+      if not self.displayName.endswith('/'):
+        self.displayName += '/'
+    self.date = self.stat.st_mtime
+    self.size = self.stat.st_size 
+    self.db = db
+
+  def getName(self):
+    """ returns the absolute pathname """
+    return self.fileName
+  def getDisplayName(self):
+    """ returns just the basename of the file; dirs end in / """
+    return self.displayName
+
+  def getDbData(self):
+    """ returns (comment, author, comment_date) """
+    if not hasattr(self,'dbCommentAuthorDate'):
+      cad = self.db.execute("select comment, author, comment_date from dirnotes where name=? order by comment_date desc",(self.fileName,)).fetchone()
+      self.dbCommentAuthorDate = cad if cad else (None, None, None)
+    return self.dbCommentAuthorDate
+  def getDbComment(self):
+    return self.getDbData()[0]
+
+  def getXattrData(self):
+    """ returns (comment, author, comment_date) """
+    if not hasattr(self,'xattrCommentAuthorDate'):
+      c = a = d = None
+      try:
+        c = os.getxattr(self.fileName, xattr_comment, follow_symlinks=False).decode()
+        a = os.getxattr(self.fileName, xattr_author, follow_symlinks=False).decode()
+        d = os.getxattr(self.fileName, xattr_date, follow_symlinks=False).decode()
+      except:  # no xattr comment
+        pass
+      self.xattrCommentAuthorDate = c,a,d
+    return self.xattrCommentAuthorDate
+  def getXattrComment(self):
+    return self.getXattrData()[0]
+
+  def setDbComment(self,newComment):
+    # how are we going to hook this?
+    #if not self.db.writable:
+    #  errorBox("The database is readonly; you cannot add or edit comments")
+    #  return
+    s = os.lstat(self.fileName)
+    try:
+      print_d(f"setDbComment db {self.db}, file: {self.fileName}")
+      self.db.execute("insert into dirnotes (name,date,size,comment,comment_date,author) values (?,datetime(?,'unixepoch','localtime'),?,?,datetime(?,'unixepoch','localtime'),?)",
+          (self.fileName, s.st_mtime, s.st_size,
+          str(newComment), time.time(), getpass.getuser()))
+      self.db.commit()
+      self.dbCommentAuthorDate = newComment, getpass.getuser(), UiHelper.epochToDb(time.time())
+    except sqlite3.OperationalError:
+      print_d("database is locked or unwritable")
+      errorBox("the database that stores comments is locked or unwritable")
+
+  def setXattrComment(self,newComment):
+    print_d(f"set comment {newComment} on file {self.fileName}")
+    try:
+      os.setxattr(self.fileName,xattr_comment,bytes(newComment,'utf8'),follow_symlinks=False)
+      os.setxattr(self.fileName,xattr_author,bytes(getpass.getuser(),'utf8'),follow_symlinks=False)
+      os.setxattr(self.fileName,xattr_date,bytes(time.strftime(DATE_FORMAT),'utf8'),follow_symlinks=False)
+      self.xattrCommentAuthorDate = newComment, getpass.getuser(), time.strftime(DATE_FORMAT) 
+      return True
+    # we need to move these cases out to a handler 
+    except Exception as e:
+      if self.isLink():
+        errorBox("Linux does not allow xattr comments on symlinks; comment is stored in database")
+      elif self.isSock():
+        errorBox("Linux does not allow comments on sockets; comment is stored in database")
+      elif os.access(self.fileName, os.W_OK)!=True:
+        errorBox(f"you don't appear to have write permissions on this file: {self.fileName}")
+        # change the listbox background to yellow
+      elif "Errno 95" in str(e):
+        errorBox("is this a VFAT or EXFAT volume? these don't allow comments")
+      return False
+
+  def getComment(self,mode):
+    """ returns the comment for the given mode """
+    return self.getDbComment() if mode == "db"    else self.getXattrComment()
+  def getOtherComment(self,mode):
+    return self.getDbComment() if mode == "xattr" else self.getXattrComment()
+  def getData(self,mode):
+    """ returns (comment, author, comment_date) for the given mode """
+    return self.getDbData()    if mode == "db"    else self.getXattrData()
+  def getOtherData(self,mode):
+    """ returns (comment, author, comment_date) for the 'other' mode """
+    return self.getDbData()    if mode == "xattr" else self.getXattrData()
+
+  def getDate(self):
+    return self.date
+  def getSize(self):
+    return self.size
+  def isDir(self):
+    return stat.S_ISDIR(self.stat.st_mode)
+  def isLink(self):
+    return stat.S_ISLNK(self.stat.st_mode)
+  def isSock(self):
+    return stat.S_ISSOCK(self.stat.st_mode)
+
+  def copyFile(self, dest, doMove = False):
+    """ dest is either a FQ filename or a FQ directory, to be expanded with same basename """
+    # NOTE: this method copies the xattr (comment + old author + old date) 
+    #       but creates new db (comment + this author + new date)
+    if os.path.isdir(dest):
+      dest = os.path.join(destDir,self.displayName)
+    try:
+      print_d("try copy from",self.fileName,"to",dest)
+      # shutil methods preserve dates & chmod/chown & xattr
+      if doMove:
+        shutil.move(self.fileName, dest)
+      else:
+        shutil.copy2(self.fileName, dest)  
+      # can raise FileNotFoundError, Permission Error, shutil.SameFileError, IsADirectoryError 
+    except:
+      errorBox(f"file copy/move to <{dest}> failed; check permissions")
+      return
+    # and copy the database record
+    f = FileObj(dest, self.db)
+    f.setDbComment(self.getDbComment())
+  def moveFile(self, dest):
+    """ dest is either a FQ filename or a FQ directory, to be expanded with same basename """
+    self.copyFile(dest, doMove = True)
+
+# >>> snip here <<<
+    
+##########  dest directory picker ###############
+# returns None if the user hits <esc>
+#     the dir_pad contents are indexed from 0,0, matching self.fs
+class showDirectoryPicker:
+  def __init__(self,starting_dir,title):
+    self.selected = None
+    self.title = title
+    self.starting_dir = self.cwd = os.path.abspath(starting_dir)
+
+    # draw the perimeter...it doesn't change  
+    self.W = curses.newwin(20,60,5,5)
+    self.W.bkgd(' ',COLOR_HELP)
+    self.h, self.w = self.W.getmaxyx()
+    self.W.keypad(True)
+    #self.W.clear()
+    self.W.box()
+    self.W.addnstr(0,1,self.title,self.w-2)
+    self.W.addstr(self.h-1,1,"<Enter> to select or change dir, <esc> to exit")
+    self.W.refresh()
+
+    self.fill()
+
+    inDialog = True
+    selected = ''
+    while inDialog:
+      c = self.W.getch()
+      y,x = self.dir_pad.getyx()
+      if c == curses.KEY_UP:
+        if y==0:
+          continue 
+        y -= 1
+        self.dir_pad.move(y,0)
+        if y < self.first_visible:
+          self.first_visible = y 
+        self.refresh()
+      elif c == curses.KEY_DOWN:
+        if y == len(self.fs)-1:
+          continue
+        y += 1
+        self.dir_pad.move(y,0)
+        if y-self.first_visible > self.h-3:
+          self.first_visible += 1
+        self.refresh()
+      elif c == CMD_CD:
+        # cd to new dir and refill
+        if y==0 and self.fs[0].startswith('<use'):    # current dir
+          self.selected = self.cwd
+          inDialog = False
+        else:
+          self.cwd = os.path.abspath(self.cwd + '/' + self.fs[y])
+          #logging.info(f"change dir to {self.cwd}")
+          self.fill()   # throw away the old self.dir_pad
+      elif c == CMD_ESC:
+        inDialog = False
+    del self.W
+
+  def value(self):
+    logging.info(f"dir picker returns {self.selected}")
+    return self.selected
+
+  def refresh(self):
+    y,x = self.W.getbegyx()
+    self.dir_pad.refresh(self.first_visible,0, x+1,y+1, x+self.h-2,y+self.w-2)
+
+  def fill(self):
+    # change to os.path.walk() and just use the directories
+    # self.fs is the list of candidates, prefixed by "use this" and ".."
+    d, self.fs, _ = next(os.walk(self.cwd))
+    self.fs.sort()
+    if self.cwd != '/':
+      self.fs.insert(0,"..")
+    if self.cwd != self.starting_dir:
+      self.fs.insert(0,f"<use this dir> {os.path.basename(self.cwd)}")
+    
+    # create a pad big enough to hold all the entries
+    self.pad_height = max(self.h-2,len(self.fs))
+    self.dir_pad = curses.newpad(self.pad_height, self.w - 2)
+    self.dir_pad.bkgdset(' ',curses.color_pair(CP_BODY))
+    self.dir_pad.clear()
+    self.first_visible = 0
+
+    # and fill it with strings
+    for i,f in enumerate(self.fs):
+      self.dir_pad.addnstr(i,0,f,self.w-2)
+    self.dir_pad.move(0,0)
+    self.refresh()
+
+########### comment management code #################
+
+# paint a dialog window with a border and contents
+#  discard the 1st line, use the next line to set the width
+def paint_dialog(b_color,data):
+  lines = data.split('\n')[1:]
+  n = len(lines[0])
+  w = curses.newwin(len(lines)+2,n+3,5,5)
+  w.bkgd(' ',b_color)
+  w.clear()
+  w.box()
+  for i,d in enumerate(lines):
+    w.addnstr(i+1,1,d,n)
+  #w.refresh I don't know why this isn't needed :(
+  return w
+
+help_string = """
+Dirnotes   add descriptions to files  
+           uses xattrs and a database
+           version %s
+ h   help window (h1/h2 for more help)
+ e   edit file description
+ d   see file+comment details
+ s   sort
+ q   quit
+ M   switch between xattr & database
+ C   copy comment between modes
+ p   preferences/settings [not impl]
+ c   copy file
+ m   move file
+<enter> to enter directory""" % (VERSION,)
+def show_help():
+  w = paint_dialog(COLOR_HELP,help_string)
+  c = w.getch()
+  del w
+  if c==ord('1'):
+    show_help1()
+  if c==ord('2'):
+    show_help2()
+
+help1_string = """
+Dirnotes stores its comments in the xattr property of files 
+where it can, and in a database.
+
+XATTR
+=====
+The xattr comments are attached to the 'user.xdg.comment' 
+property.  If you copy/move/tar the file, there are often 
+options to move the xattrs with the file. 
+
+The xattr comments don't always work. For example, you may 
+not have write permission on a file. Or you may be using 
+an exFat/fuse filesystem that doesn't support xattr. You 
+cannot add xattr comments to symlinks.
+
+DATABASE
+========
+The database isvstored at ~/.dirnotes.db using sqlite3.
+The comments are indexed by the realpath(filename), which 
+may change if you use external drives and use varying 
+mountpoints.
+
+These comments will not move with a file unless you use the
+move/copy commands inside this program.
+
+The database allows you to add comments to files you don't 
+own, or which are read-only.
+
+When the comments in the two systems differ, the comment is
+highlighted in green. The 'M' command lets you view either
+xattr or database comments. The 'C' command allows you to 
+copy comments between xattr and database."""
+def show_help1():
+  w = paint_dialog(COLOR_HELP,help1_string)
+  c = w.getch()
+  del w
+
+help2_string = """
+The comments are also stored with the date-of-the-comment and
+the username of the comment's author. The 'd' key will 
+display that info.
+
+Optionally, the database can be stored at 
+  /var/lib/dirnotes/dirnotes.db 
+which allows access to all users (not implimented)"""
+def show_help2():
+  w = paint_dialog(COLOR_HELP,help2_string)
+  c = w.getch()
+  del w
+
+sort_string = """
+Select sort order: 
+ 
+  name
+  date
+  size
+  comment"""
+def show_sort():
+  h = paint_dialog(COLOR_HELP,sort_string)
+  h.attron(COLOR_TITLE)
+  h.addstr(3,3,"n") or h.addstr(4,3,"d") or h.addstr(5,3,"s") or h.addstr(6,3,"c")
+  h.attroff(COLOR_TITLE)
+  h.refresh()
+  c = h.getch()
+  del h
+  return c
+
+detail_string = """
+Comments detail:                                          
+  Comment: 
+  Author: 
+  Date:  """
+
+def show_detail(f):
+  global mode
+  h = paint_dialog(COLOR_HELP,detail_string)
+  c,a,d = f.getData(mode)   # get all three, depending on the current mode
+  h.addstr(1,20,"from xattrs" if mode=="xattr" else "from database")
+  h.addnstr(2,12,c or "<not set>",h.getmaxyx()[1]-13)
+  h.addstr(3,12,a or "<not set>")
+  h.addstr(4,12,d or "<not set>")
+  h.refresh()
+  c = h.getch()
+  del h
+  return c
+
+
+## used by the comment editor to pick up <ENTER> and <ESC>
+edit_done = False
+def edit_fn(c):
+  global edit_done
+  if c==ord('\n'):
+    edit_done = True
+    return 7
+  if c==27:
+    return 7
+  return c
+
+def main(w, cwd, database_file, start_file):
+  global files, edit_done, mode
+  global COLOR_TITLE, COLOR_BODY, COLOR_FOCUS, COLOR_ERROR, COLOR_HELP
+
+  curses.init_pair(CP_TITLE, curses.COLOR_YELLOW,curses.COLOR_BLUE)
+  curses.init_pair(CP_BODY,  curses.COLOR_WHITE,curses.COLOR_BLUE)
+  curses.init_pair(CP_FOCUS, curses.COLOR_BLACK,curses.COLOR_CYAN)
+  curses.init_pair(CP_ERROR, curses.COLOR_BLACK,curses.COLOR_RED)
+  curses.init_pair(CP_HELP,  curses.COLOR_WHITE,curses.COLOR_CYAN)
+  curses.init_pair(CP_DIFFER,curses.COLOR_WHITE,curses.COLOR_GREEN)
+
+  COLOR_TITLE = curses.color_pair(CP_TITLE) | curses.A_BOLD
+  COLOR_BODY  = curses.color_pair(CP_BODY)
+  COLOR_FOCUS = curses.color_pair(CP_FOCUS)
+  COLOR_ERROR = curses.color_pair(CP_ERROR)
+  COLOR_HELP  = curses.color_pair(CP_HELP)  
+  COLOR_DIFFER = curses.color_pair(CP_DIFFER)
+  logging.info(f"COLOR_DIFFER is {COLOR_DIFFER}")
+
+  db = DnDataBase(database_file).db
+
+  files = Files(cwd,db)
+  logging.info(f"got files, len={len(files)}")
+
+  mywin = Pane(w,cwd,files,start_file = start_file)
+    
+  showing_edit = False
+
+  while True:
+    c = mywin.file_pad.getch(mywin.cursor,1)
+    
+    if c == CMD_QUIT or c == CMD_ESC:
+      break
+
+    elif c == CMD_HELP:
+      show_help()
+      mywin.refresh()
+
+    elif c == CMD_SORT:
+      c = show_sort()
+      if c == ord('s') or c == ord('S'):
+        Files.sortFunc = Files.sortSize
+      elif c == ord('n') or c == ord('N'):
+        Files.sortFunc = Files.sortName
+      elif c == ord('d') or c == ord('D'):
+        Files.sortFunc = Files.sortDate
+      elif c == ord('c') or c == ord('C'):
+        Files.sortFunc = Files.sortComment
+      files.sort()
+      mywin.refill()
+      mywin.refresh()
+
+    elif c == curses.KEY_UP:
+      mywin.line_move(-1)
+    elif c == curses.KEY_DOWN:
+      mywin.line_move(1)
+    elif c == curses.KEY_PPAGE:
+      mywin.line_move(-mywin.pad_visible+1)
+    elif c == curses.KEY_NPAGE:
+      mywin.line_move(mywin.pad_visible-1)
+    elif c == curses.KEY_HOME:
+      mywin.line_move(-len(files)+1)
+    elif c == curses.KEY_END:
+      mywin.line_move(len(files)-1)
+
+    elif c == CMD_DETAIL:
+      show_detail(files[mywin.cursor])
+      mywin.refresh()
+
+    elif c == CMD_MODE:
+      mode = "db" if mode=="xattr" else "xattr"
+      mywin.refill()
+      mywin.refresh()
+
+    elif c == CMD_RELOAD:
+      where = files.getCurDir().fileName
+      files = Files(where,db)
+      mywin = Pane(w,where,files)
+
+    elif c == CMD_CD:
+      f = files[mywin.cursor]
+      if f.isDir():
+        cwd = f.getName()
+        print_d(f"CD change to {cwd}")
+        files = Files(cwd,db)
+        mywin = Pane(w,cwd,files)
+        # TODO: should this simply re-fill() the existing Pane instead of destroy?
+
+    elif c == CMD_EDIT:
+      showing_edit = True
+      edit_window = curses.newwin(5,(4*mywin.w) // 5,mywin.h // 2 - 3, mywin.w // 10)
+      edit_window.box()
+      edit_window.addstr(0,1,"<enter> when done, <esc> to cancel")
+      he,we = edit_window.getmaxyx()
+      edit_sub = edit_window.derwin(3,we-2,1,1)
+      
+      f = files[mywin.cursor]
+      mywin.setStatus(f"Edit file: {f.getName()}")
+      existing_comment = f.getXattrComment()
+      edit_sub.addstr(0,0,existing_comment or '') 
+      text = curses.textpad.Textbox(edit_sub)
+      edit_window.refresh()
+
+      comment = text.edit(edit_fn).strip()  
+
+      logging.info(f"comment: {comment} and flag-ok {edit_done}")
+      if edit_done:
+        comment = comment.replace('\n',' ')
+        logging.info(f"got a new comment as '{comment}'")
+        edit_done = False
+        f.setXattrComment(comment)
+        f.setDbComment(comment)
+        logging.info(f"set file {f.fileName} with comment <{comment}>")
+        mywin.main_win.redrawln(mywin.cursor-mywin.first_visible+2,1)
+      del text, edit_sub, edit_window
+      mywin.main_win.redrawln(mywin.h // 2 - 3, 5)
+      mywin.statusbar.redrawwin()
+      mywin.focus_line()
+      mywin.refresh()
+
+    elif c == CMD_CMNT_CP:
+      # copy comments to the other mode
+      cp_cmnt_ask = curses.newwin(6,40,5,5)
+      cp_cmnt_ask.box()
+      cp_cmnt_ask.addstr(1,1,"Copy comments to ==> ")
+      cp_cmnt_ask.addstr(1,22,"database" if mode=="xattr" else "xattr")
+      cp_cmnt_ask.addstr(2,1," 1  just this file")
+      cp_cmnt_ask.addstr(3,1," a  all files with comments")
+      cp_cmnt_ask.addstr(4,1,"esc to cancel")
+      cp_cmnt_ask.refresh()
+       
+      c = cp_cmnt_ask.getch()
+      if c in (ord('1'), ord('a'), ord('A')):
+        # copy comments for one file or all
+        if c==ord('1'):
+          collection = [files[mywin.cursor]]
+        else:
+          collection = files
+        for f in collection:
+          if mode=="xattr":
+            if f.getXattrComment():
+              f.setDbComment(f.getXattrComment())
+          else:
+            if f.getDbComment():
+              f.setXattrComment(f.getDbComment())
+      mywin.refill()
+      mywin.refresh()
+
+    elif c == CMD_COPY:
+      if files[mywin.cursor].getDisplayName() == "../":
+        continue
+      if files[mywin.cursor].isDir():
+        errorBox(f"<{files[mywin.cursor].getDisplayName()}> is a directory. Copy not allowed")
+      else:
+        dest_dir = showDirectoryPicker(cwd,"Select folder for copy").value()
+        if dest_dir:
+          files[mywin.cursor].copyFile(dest_dir)
+      mywin.refresh() 
+
+    elif c == CMD_MOVE:
+      if files[mywin.cursor].getDisplayName() == "../":
+        continue
+      if files[mywin.cursor].isDir():
+        errorBox(f"<{files[mywin.cursor].getDisplayName()}> is a directory. Move not allowed")
+      else:
+        dest_dir = showDirectoryPicker(cwd,"Select folder for move").value()
+        if dest_dir:
+          files[mywin.cursor].moveFile(dest_dir)
+          files = Files(cwd,db)
+          mywin = Pane(w,cwd,files) # is this the way to refresh the main pane? TODO
+      mywin.refresh()   # to clean up the errorBox or FolderPicker
+        
+
+    elif c == curses.KEY_RESIZE:
+      mywin.resize()
+    #mywin.refresh()
+
+def pre_main():
+  # done before we switch to curses mode
+  logging.basicConfig(filename='/tmp/dirnotes.log', level=logging.DEBUG)
+  logging.info("starting curses dirnotes")
+
+  parser = argparse.ArgumentParser(description="Add comments to files")
+  parser.add_argument('-c','--config',  dest='config_file', help="config file (json format)")
+  parser.add_argument('-v','--version', action='version', version=f"dirnotes ver:{VERSION}")
+  parser.add_argument('-d','--db', action='store_true',help="start up in database mode")
+  parser.add_argument('-x','--xattr', action='store_true',help="start up in xattr mode")
+  parser.add_argument('directory', type=str, default='.', nargs='?',  help="directory or file to start")
+  args = parser.parse_args()
+  logging.info(args)
+
+  config = ConfigLoader(args.config_file or DEFAULT_CONFIG_FILE)
+  if args.db:
+    config.mode = "db"
+  if args.xattr:
+    config.mode = "xattr"
+  # print(repr(config))
+  # print("start_mode",config["start_mode"])
+  
+  return args, config
+
+curses_running = False
+args, config = pre_main()
+
+mode = config.mode
+xattr_comment = config.xattr_comment
+xattr_author  = config.xattr_comment + ".author"
+xattr_date    = config.xattr_comment + ".date"
+database_name = config.dbName
+if os.path.isdir(args.directory):
+  cwd, start_file = args.directory, None
+else:
+  cwd, start_file = os.path.split(args.directory)
+
+curses_running = True
+curses.wrapper(main, cwd or '.', database_name, start_file)
+
+
