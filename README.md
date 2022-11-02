@@ -68,10 +68,13 @@ The <code>**dirnotes**</code> app requires _Python3_ and the _Qt5_ framework.
 The <code>**dirnotes-tui**</code> and <code>**dirnotes-cli**</code> apps 
 simply require _Python3_.
 
-Simply copy the file into your path, to ~/.local/bin for example. 
+Simply copy the 3 executable files into your path, to <code>\~/.local/bin/</code> for example. 
+
+    cp dirnotes dirnotes-tui dirnotes-cli \~/.local/bin/
+ 
 For a better GUI experience, copy 
-<code>dirnotes.desktop</code> to <code>~/.local/share/applications</code> and 
-<code>dirnotes.xpm</code> to <code>~/.local/share/icons/</code> 
+<code>dirnotes.desktop</code> to <code>\~/.local/share/applications</code> and 
+<code>dirnotes.xpm</code> to <code>\~/.local/share/icons/</code> 
 
 ### CONFIG FILE
 
@@ -79,9 +82,9 @@ By default, the file **~/.config/dirnotes/dirnotes.conf** will be used to
 load the user's config. 
 This is a JSON file, with three attributes that are important:
 
-> * xattr_tag (default: <code>usrr.xdg.comment</code>)
-> * database (default: <code>~/.local/share/dirnotes/dirnotes.db</code>, sensible alt: <code>/var/lib/dirnotes.db</code>) 
-> * start_mode (_xattr_ or _db_ display priority)
+* xattr_tag (default: <code>usrr.xdg.comment</code>)
+* database (default: <code>~/.local/share/dirnotes/dirnotes.db</code>, sensible alt: <code>/var/lib/dirnotes.db</code>) 
+* start_mode (_xattr_ or _db_ display priority)
 
 The _config_file_ should be auto-generated the first time one of 
 the **dirnotes** apps is run.
