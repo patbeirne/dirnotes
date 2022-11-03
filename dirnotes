@@ -498,8 +498,7 @@ class DirNotes(QMainWindow):
     mf.addAction("Quit", self.close, QKeySequence.Quit)
     mf.addAction("About", self.about, QKeySequence.HelpContents)
 
-    self.setWindowTitle("==DirNotes==   Dir: "+self.curPath)
-    self.setMinimumSize(600,700)
+    self.setMinimumSize(800,500)
     self.setWindowIcon(QIcon(QPixmap(icon)))
 
     lb = QTableWidget()
@@ -607,6 +606,7 @@ class DirNotes(QMainWindow):
     self.refilling = True
     self.lb.sortingEnabled = False
     self.directory = FileObj(self.curPath,self.db)
+    self.setWindowTitle("==DirNotes==   Dir: "+self.curPath)
     
     self.thisDirLabel.setText(f'<table width=100%><tr><th><b>{self.directory.getDisplayName()}</b></th><th style"text-align:right;">{self.directory.getComment(mode)}</th></tr></table>')
     (self.modeShow.setText("<i>Showing comments stored in extended attributes</i><br>(xattr: user.xdg.comment)") 
