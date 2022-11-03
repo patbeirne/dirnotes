@@ -2,6 +2,7 @@
 
 # TODO: XDG compatibility: config in ~/.config/dirnotes/dirnotes.conf and data in ~/.local/share/dirnotes/dirnotes.db
 # TODO: clearing a comment out to '' doesn't seem to work on both sides
+# TODO: change banner line to indicate the CWD 
 
 """ a simple gui or command line app
 to view and create/edit file comments

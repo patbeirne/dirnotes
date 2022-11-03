@@ -52,7 +52,7 @@ The <code>**dirnotes-cli**</code> program has a man page.
 
 In short, you navigate <code>**dirnotes**</code> and 
 <code>**dirnotes-tui**</code> by using the up/down arrow keys, 
-<enter> to enter into a directory. 
+\<enter\> to enter into a directory. 
 The **-tui** version accepts _e_ for edit, _s_ for sort, _M_ to change 
 between xattr/database priority.
 
@@ -215,7 +215,12 @@ The database is created the first time one of the **dirnotes** apps is run.
 
 The <code>**dirnotes**</code> gui app has a desktop icon built into the code. 
 There is not need for an external .icon file, but there is an .xpm file included
-in the project, which can be copied to ~/.local/share/icons/
+in the project, which can be copied to <code>~/.local/share/icons/</code>
+
+The 3 apps share a big block of common code. At this point, the code is embedded
+in each executable, but perhaps in the future it will be brought out as a library.
+I just like apps to be a single file I can copy to my various devices and servers,
+but it does create a problem of keepint the 3 apps in sync.
 
 ### comment date & author
 
