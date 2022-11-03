@@ -184,6 +184,9 @@ Or, in json format:
 > <code>$ dirnotes-cli -j car_notes.txt</code>  
 > <code>[{"file": "car_notes.txt", "comment": "notes on the car repair"}]</code>
 
+[NOTE: with json output, consider piping the results to <code>jq</code> for
+pretty-print]
+
 To append to a comment:
 
 > <code>$ dirnotes-cli -a 'first quote: \$1,400' car_notes.txt</code>  

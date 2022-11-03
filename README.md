@@ -40,6 +40,9 @@ or if terminal apps are your preference.
 The <code>**dirnotes-cli**</code> is a command line tool, 
 which may be handy for scripting. This all can also do maintenance on the database.
 
+<img src=images/gui_sample.png alt="gui sample" />
+<img src=images/tui_sample.png alt="tui sample" />
+
 ## USAGE
 
 The <code>**dirnotes**</code> program displays usage and keystoke info 
@@ -68,13 +71,22 @@ The <code>**dirnotes**</code> app requires _Python3_ and the _Qt5_ framework.
 The <code>**dirnotes-tui**</code> and <code>**dirnotes-cli**</code> apps 
 simply require _Python3_.
 
-Simply copy the 3 executable files into your path, to <code>\~/.local/bin/</code> for example. 
+Simply mark the 3 python files as executable copy them into your 
+path, to <code>\~/.local/bin/</code> or <code>/usr/local/bin/</code>. 
 
-    cp dirnotes dirnotes-tui dirnotes-cli \~/.local/bin/
+        chmod a+x dirnotes dirnotes-tui dirnotes-cli
+        cp dirnotes dirnotes-tui dirnotes-cli \~/.local/bin/
  
 For a better GUI experience, copy 
 <code>dirnotes.desktop</code> to <code>\~/.local/share/applications</code> and 
 <code>dirnotes.xpm</code> to <code>\~/.local/share/icons/</code> 
+
+If you are using the command-line tool <code>**dirnotes-cli**</code>, 
+you can generate a man page using
+
+        pandoc -s -t man -o dirnotes-cli.1 dirnotes-cli.md
+
+and copy that to ```~/.local/share/man/man1```
 
 ### CONFIG FILE
 
@@ -82,7 +94,7 @@ By default, the file **~/.config/dirnotes/dirnotes.conf** will be used to
 load the user's config. 
 This is a JSON file, with three attributes that are important:
 
-* xattr_tag (default: <code>usrr.xdg.comment</code>)
+* xattr_tag (default: <code>user.xdg.comment</code>)
 * database (default: <code>~/.local/share/dirnotes/dirnotes.db</code>, sensible alt: <code>/var/lib/dirnotes.db</code>) 
 * start_mode (_xattr_ or _db_ display priority)
 
@@ -193,9 +205,7 @@ As comments are editted or appended, new records are added to the database.
 Older records are are not purged. This gives you a history of the comments, 
 but it means that fetching the most recent comment involves something like
 
-~~~~
-  SELECT * FROM dirnotes WHERE name=? ORDER BY comment_date DESC
-~~~~
+        SELECT * FROM dirnotes WHERE name=? ORDER BY comment_date DESC
 
 and just fetch the first record.
 
@@ -288,4 +298,3 @@ Does anyone have an opinion?
 
 6. Is anyone interested in the MacOS version?
 
-TTD: add a screenshot of the gui and tui versions; add to the examples for dirnotes-cli -j where it pipes to <code>jq</code>
