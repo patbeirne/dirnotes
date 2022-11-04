@@ -206,13 +206,13 @@ The **dirnotes-cli** program provides command line access, and can be scripted.
 
 # CONFIGURATION FILE
 
-By default, the file **~/.dirnotes.conf** will be used to load the user's config. There are
-three attributes described in that file that are important:
+By default, the file **~/.config/dirnotes/dirnotes.conf** will be used to 
+load the user's config. There are three attributes described in that file 
+that are important:
 
 > * xattr_tag  [default: user.xdg.comment]   
 > * database   [default: ~/.local/share/dirnotes/dirnotes.db]  
 > * start_mode [default: xattr]  
 
-The default location for the config file is ~/.config/dirnotes/dirnotes.conf
 
 

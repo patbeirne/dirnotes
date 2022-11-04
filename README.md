@@ -71,7 +71,7 @@ The <code>**dirnotes**</code> app requires _Python3_ and the _Qt5_ framework.
 The <code>**dirnotes-tui**</code> and <code>**dirnotes-cli**</code> apps 
 simply require _Python3_.
 
-Simply mark the 3 python files as executable copy them into your 
+Simply mark the 3 python files as executable and copy them into your 
 path, to <code>\~/.local/bin/</code> or <code>/usr/local/bin/</code>. 
 
         chmod a+x dirnotes dirnotes-tui dirnotes-cli

@@ -1,8 +1,6 @@
 #!/usr/bin/python3
 
-# TODO: XDG compatibility: config in ~/.config/dirnotes/dirnotes.conf and data in ~/.local/share/dirnotes/dirnotes.db
-# TODO: clearing a comment out to '' doesn't seem to work on both sides
-# TODO: change banner line to indicate the CWD 
+# TODO: if the config file doesn't exist, errorBox() fails because MainWindow doesn't exist yet
 
 """ a simple gui or command line app
 to view and create/edit file comments
@@ -373,17 +371,20 @@ class KeyboardHelpWidget(QDialog):
 class errorBox(QDialog):
   def __init__(self, text):
     print_d(f"errorBox: {text}")
-    super(QDialog, self).__init__(mainWindow)
-    self.layout = QVBoxLayout(self)
-    self.tb = QLabel(self)
-    self.tb.setWordWrap(True)
-    self.tb.setFixedWidth(500)
-    self.tb.setText(text)
-    self.pb = QPushButton("OK",self)
-    self.layout.addWidget(self.tb)
-    self.layout.addWidget(self.pb)
-    self.pb.clicked.connect(self.close)
-    self.show()
+    if 'mainWindow' in globals():
+      super(QDialog, self).__init__(mainWindow)
+      self.layout = QVBoxLayout(self)
+      self.tb = QLabel(self)
+      self.tb.setWordWrap(True)
+      self.tb.setFixedWidth(500)
+      self.tb.setText(text)
+      self.pb = QPushButton("OK",self)
+      self.layout.addWidget(self.tb)
+      self.layout.addWidget(self.pb)
+      self.pb.clicked.connect(self.close)
+      self.show()
+    else:
+      print(text)
 
 keyboardHelpMsg = """
 <h2>Keyboard Shortcuts</h2>
